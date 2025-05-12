@@ -17,6 +17,8 @@ import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 from collections import defaultdict, deque
+import numpy as np
+import re
 
 # Load environment variables from .env file if it exists
 env_path = Path('.') / '.env'
@@ -51,6 +53,242 @@ st.markdown("""
 This application calculates FIFO and LIFO weighted average prices for open positions based on trade data.
 Upload your trade data file (Excel or CSV) to get started.
 """)
+
+# Helper functions for AI Assistant
+def generate_ai_response(prompt, data_context):
+    """
+    Generate a response using Google's Gemini AI model.
+
+    Args:
+        prompt: The user's question
+        data_context: Dictionary containing trade and position data
+
+    Returns:
+        AI-generated response as a string
+    """
+    # Format the data context for the AI
+    context_str = format_data_for_ai(data_context)
+
+    # Create a system prompt with instructions
+    system_prompt = """
+    You are an AI Assistant specialized in analyzing trade data and positions.
+
+    Your capabilities:
+    - Analyze trade data and positions to answer user questions
+    - Explain financial concepts like FIFO and LIFO
+    - Provide insights about trading patterns and positions
+    - Calculate statistics and metrics from the data
+
+    When responding:
+    - Be concise but thorough
+    - Use markdown formatting for better readability
+    - Include relevant numbers and calculations
+    - Explain your reasoning
+    - If asked about specific contracts, focus on those
+    - If the data doesn't contain information to answer the question, explain what's missing
+    """
+
+    # Create the user prompt with the question and data context
+    user_prompt = f"""
+    Question: {prompt}
+
+    Here's the data I have available:
+    {context_str}
+
+    Please analyze this data to answer my question. Provide clear explanations and insights.
+    """
+
+    # Configure the model
+    generation_config = {
+        "temperature": 0.2,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_output_tokens": 2048,
+    }
+
+    # Create the model
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        generation_config=generation_config
+    )
+
+    # Generate the response
+    response = model.generate_content([
+        {"role": "user", "parts": [system_prompt]},
+        {"role": "model", "parts": ["I understand. I'll help analyze trade data and positions based on the context provided."]},
+        {"role": "user", "parts": [user_prompt]}
+    ])
+
+    return response.text
+
+def format_data_for_ai(data_context):
+    """
+    Format the data context into a string for the AI.
+
+    Args:
+        data_context: Dictionary containing trade and position data
+
+    Returns:
+        Formatted string with data context
+    """
+    context_parts = []
+
+    # Add position stats
+    if "position_stats" in data_context:
+        stats = data_context["position_stats"]
+        context_parts.append(f"Position Summary: {stats['num_positions']} positions across {stats['total_contracts']} contracts")
+        context_parts.append(f"Total quantity: {stats['total_quantity']}")
+        context_parts.append(f"Average FIFO price: {stats['avg_fifo_price']:.2f}")
+        context_parts.append(f"Average LIFO price: {stats['avg_lifo_price']:.2f}")
+        context_parts.append(f"Contracts: {', '.join(stats['contracts_list'])}")
+
+    # Add P&L stats if available
+    if "pnl_stats" in data_context:
+        pnl_stats = data_context["pnl_stats"]
+        context_parts.append(f"Total FIFO P&L: {pnl_stats['total_fifo_pnl']:.2f}")
+        context_parts.append(f"Total LIFO P&L: {pnl_stats['total_lifo_pnl']:.2f}")
+
+    # Add position details
+    if "positions" in data_context and data_context["positions"]:
+        context_parts.append("\nPosition Details:")
+        for i, pos in enumerate(data_context["positions"][:10]):  # Limit to first 10 positions
+            context_parts.append(
+                f"Position {i+1}: {pos['contract']}, Quantity: {pos['open_qty']}, "
+                f"FIFO WAP: {pos['fifo_wap']:.2f}, LIFO WAP: {pos['lifo_wap']:.2f}, "
+                f"Expiry: {pos['expiry']}, Client: {pos['client_code']}"
+            )
+
+        if len(data_context["positions"]) > 10:
+            context_parts.append(f"... and {len(data_context['positions']) - 10} more positions")
+
+    # Add P&L details if available
+    if "pnl" in data_context and data_context["pnl"]:
+        context_parts.append("\nP&L Details:")
+        for i, pnl in enumerate(data_context["pnl"][:10]):  # Limit to first 10 P&L entries
+            context_parts.append(
+                f"P&L {i+1}: {pnl['contract']}, Current Price: {pnl['current_price']:.2f}, "
+                f"FIFO P&L: {pnl['fifo_pnl']:.2f}, LIFO P&L: {pnl['lifo_pnl']:.2f}"
+            )
+
+        if len(data_context["pnl"]) > 10:
+            context_parts.append(f"... and {len(data_context['pnl']) - 10} more P&L entries")
+
+    # Add trade summary if available
+    if "trades" in data_context and data_context["trades"]:
+        context_parts.append(f"\nTrade Summary: {len(data_context['trades'])} trades")
+
+        # Count buys and sells
+        buy_count = sum(1 for trade in data_context["trades"] if trade.get('side') == 'Buy')
+        sell_count = sum(1 for trade in data_context["trades"] if trade.get('side') == 'Sell')
+        context_parts.append(f"Buy trades: {buy_count}, Sell trades: {sell_count}")
+
+        # Add sample trades
+        context_parts.append("\nSample Trades:")
+        for i, trade in enumerate(data_context["trades"][:5]):  # Limit to first 5 trades
+            context_parts.append(
+                f"Trade {i+1}: {trade.get('date', 'N/A')}, {trade.get('contract', 'N/A')}, "
+                f"{trade.get('side', 'N/A')}, Quantity: {trade.get('quantity', 'N/A')}, "
+                f"Price: {trade.get('price', 'N/A')}, Client: {trade.get('client_code', 'N/A')}"
+            )
+
+        if len(data_context["trades"]) > 5:
+            context_parts.append(f"... and {len(data_context['trades']) - 5} more trades")
+
+    return "\n".join(context_parts)
+
+def generate_simple_response(prompt, positions_df):
+    """
+    Generate a simple response without using the AI API.
+    This is a fallback when the API key is not configured.
+
+    Args:
+        prompt: The user's question
+        positions_df: DataFrame containing position data
+
+    Returns:
+        Simple response as a string
+    """
+    # Get basic stats about the positions
+    num_positions = len(positions_df)
+    total_contracts = positions_df['contract'].nunique()
+    contracts_list = positions_df['contract'].unique().tolist()
+
+    # Find largest position
+    if not positions_df.empty:
+        largest_position = positions_df.loc[positions_df['open_qty'].idxmax()]
+        largest_contract = largest_position['contract']
+        largest_qty = largest_position['open_qty']
+    else:
+        largest_contract = "None"
+        largest_qty = 0
+
+    # Generate response based on the question
+    prompt_lower = prompt.lower()
+
+    if "largest" in prompt_lower or "biggest" in prompt_lower:
+        if num_positions > 0:
+            return f"Based on your data, your largest position is in **{largest_contract}** with an open quantity of **{largest_qty}**."
+        else:
+            return "You currently have no open positions in your data."
+
+    elif any(contract.lower() in prompt_lower for contract in contracts_list):
+        # Find which contract they're asking about
+        for contract in contracts_list:
+            if contract.lower() in prompt_lower:
+                contract_data = positions_df[positions_df['contract'] == contract].iloc[0]
+                return f"""
+                You have a position in **{contract}** with:
+                - Open quantity: **{contract_data['open_qty']}**
+                - FIFO weighted average price: **${contract_data['fifo_wap']}**
+                - LIFO weighted average price: **${contract_data['lifo_wap']}**
+                - Expiry date: **{contract_data['expiry']}**
+                """
+
+    elif "fifo" in prompt_lower or "lifo" in prompt_lower:
+        if num_positions > 0:
+            # Create a table of FIFO vs LIFO prices
+            table_rows = []
+            for _, row in positions_df.iterrows():
+                table_rows.append(f"| {row['contract']} | ${row['fifo_wap']} | ${row['lifo_wap']} |")
+
+            table = "\n".join(table_rows)
+
+            return f"""
+            **FIFO** (First-In-First-Out) and **LIFO** (Last-In-First-Out) are methods for calculating the weighted average price of your positions:
+
+            - **FIFO**: Assumes that the oldest trades are closed first
+            - **LIFO**: Assumes that the newest trades are closed first
+
+            Your positions show different weighted average prices using these methods:
+
+            | Contract | FIFO WAP | LIFO WAP |
+            |----------|----------|----------|
+            {table}
+            """
+        else:
+            return "You currently have no open positions to calculate FIFO or LIFO prices."
+
+    else:
+        if num_positions > 0:
+            positions_summary = []
+            for _, row in positions_df.iterrows():
+                positions_summary.append(f"**{row['contract']}** ({row['open_qty']} units)")
+
+            positions_text = ", ".join(positions_summary)
+
+            return f"""
+            I've analyzed your trade data. You have {num_positions} open positions: {positions_text}.
+
+            What specific information would you like to know about your positions?
+
+            You can ask about:
+            - Details about a specific contract
+            - Your largest position
+            - FIFO vs LIFO pricing
+            - Expiry dates
+            """
+        else:
+            return "You currently have no open positions in your data. Please upload trade data and calculate positions first."
 
 # Initialize session state variables
 if "uploaded_file" not in st.session_state:
@@ -587,6 +825,62 @@ with tab4:
         Ask questions about your trade data and positions. The AI assistant can help you understand your data and provide insights.
         """)
 
+        # Check if API key is configured
+        api_key_configured = False
+        try:
+            if 'GOOGLE_API_KEY' in st.secrets and st.secrets['GOOGLE_API_KEY'] != 'your_api_key_here':
+                api_key_configured = True
+            elif os.environ.get('GOOGLE_API_KEY') and os.environ.get('GOOGLE_API_KEY') != 'your_api_key_here':
+                api_key_configured = True
+        except Exception:
+            pass
+
+        if not api_key_configured:
+            st.warning("""
+            **Google API Key Not Configured**
+
+            To use the AI Assistant, you need to configure a Google API key for Gemini.
+
+            You can do this by:
+            1. Creating a `.streamlit/secrets.toml` file with your API key
+            2. Setting the GOOGLE_API_KEY environment variable
+
+            Without an API key, the AI Assistant will use a simplified mode with limited capabilities.
+            """)
+            use_advanced_ai = False
+        else:
+            use_advanced_ai = True
+
+        # Initialize session state for data context
+        if "data_context" not in st.session_state:
+            st.session_state.data_context = {}
+
+        # Prepare data context for AI
+        positions_df = st.session_state.positions_df
+        trades_df = st.session_state.df if st.session_state.df is not None else None
+
+        # Update data context in session state
+        st.session_state.data_context = {
+            "positions": positions_df.to_dict('records') if positions_df is not None else [],
+            "trades": trades_df.to_dict('records') if trades_df is not None else [],
+            "position_stats": {
+                "num_positions": len(positions_df) if positions_df is not None else 0,
+                "total_contracts": positions_df['contract'].nunique() if positions_df is not None else 0,
+                "contracts_list": positions_df['contract'].unique().tolist() if positions_df is not None else [],
+                "total_quantity": positions_df['open_qty'].sum() if positions_df is not None else 0,
+                "avg_fifo_price": positions_df['fifo_wap'].mean() if positions_df is not None else 0,
+                "avg_lifo_price": positions_df['lifo_wap'].mean() if positions_df is not None else 0
+            }
+        }
+
+        # If we have P&L data, add it to the context
+        if st.session_state.pnl_df is not None:
+            st.session_state.data_context["pnl"] = st.session_state.pnl_df.to_dict('records')
+            st.session_state.data_context["pnl_stats"] = {
+                "total_fifo_pnl": st.session_state.pnl_df['fifo_pnl'].sum(),
+                "total_lifo_pnl": st.session_state.pnl_df['lifo_pnl'].sum()
+            }
+
         # Display chat messages
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
@@ -604,89 +898,17 @@ with tab4:
             # Display assistant response
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    # Generate response based on actual data
-                    positions_df = st.session_state.positions_df
-
-                    # Get basic stats about the positions
-                    num_positions = len(positions_df)
-                    total_contracts = positions_df['contract'].nunique()
-                    contracts_list = positions_df['contract'].unique().tolist()
-
-                    # Find largest position
-                    if not positions_df.empty:
-                        largest_position = positions_df.loc[positions_df['open_qty'].idxmax()]
-                        largest_contract = largest_position['contract']
-                        largest_qty = largest_position['open_qty']
+                    if use_advanced_ai:
+                        try:
+                            # Use Gemini AI for advanced response
+                            response = generate_ai_response(prompt, st.session_state.data_context)
+                        except Exception as e:
+                            st.error(f"Error generating AI response: {str(e)}")
+                            # Fall back to simple response
+                            response = generate_simple_response(prompt, positions_df)
                     else:
-                        largest_contract = "None"
-                        largest_qty = 0
-
-                    # Generate response based on the question
-                    if "largest" in prompt.lower() or "biggest" in prompt.lower():
-                        if num_positions > 0:
-                            response = f"Based on your data, your largest position is in **{largest_contract}** with an open quantity of **{largest_qty}**."
-                        else:
-                            response = "You currently have no open positions in your data."
-
-                    elif any(contract.lower() in prompt.lower() for contract in contracts_list):
-                        # Find which contract they're asking about
-                        for contract in contracts_list:
-                            if contract.lower() in prompt.lower():
-                                contract_data = positions_df[positions_df['contract'] == contract].iloc[0]
-                                response = f"""
-                                You have a position in **{contract}** with:
-                                - Open quantity: **{contract_data['open_qty']}**
-                                - FIFO weighted average price: **${contract_data['fifo_wap']}**
-                                - LIFO weighted average price: **${contract_data['lifo_wap']}**
-                                - Expiry date: **{contract_data['expiry']}**
-                                """
-                                break
-
-                    elif "fifo" in prompt.lower() or "lifo" in prompt.lower():
-                        if num_positions > 0:
-                            # Create a table of FIFO vs LIFO prices
-                            table_rows = []
-                            for _, row in positions_df.iterrows():
-                                table_rows.append(f"| {row['contract']} | ${row['fifo_wap']} | ${row['lifo_wap']} |")
-
-                            table = "\n".join(table_rows)
-
-                            response = f"""
-                            **FIFO** (First-In-First-Out) and **LIFO** (Last-In-First-Out) are methods for calculating the weighted average price of your positions:
-
-                            - **FIFO**: Assumes that the oldest trades are closed first
-                            - **LIFO**: Assumes that the newest trades are closed first
-
-                            Your positions show different weighted average prices using these methods:
-
-                            | Contract | FIFO WAP | LIFO WAP |
-                            |----------|----------|----------|
-                            {table}
-                            """
-                        else:
-                            response = "You currently have no open positions to calculate FIFO or LIFO prices."
-
-                    else:
-                        if num_positions > 0:
-                            positions_summary = []
-                            for _, row in positions_df.iterrows():
-                                positions_summary.append(f"**{row['contract']}** ({row['open_qty']} units)")
-
-                            positions_text = ", ".join(positions_summary)
-
-                            response = f"""
-                            I've analyzed your trade data. You have {num_positions} open positions: {positions_text}.
-
-                            What specific information would you like to know about your positions?
-
-                            You can ask about:
-                            - Details about a specific contract
-                            - Your largest position
-                            - FIFO vs LIFO pricing
-                            - Expiry dates
-                            """
-                        else:
-                            response = "You currently have no open positions in your data. Please upload trade data and calculate positions first."
+                        # Use simple response generation
+                        response = generate_simple_response(prompt, positions_df)
 
                     st.markdown(response)
 
@@ -708,6 +930,23 @@ with st.sidebar:
     4. Fetch current market prices (manual entry)
     5. Generate visualizations
     6. Provide AI-powered insights and answers
+    """)
+
+    # Add information about the AI Assistant
+    st.header("AI Assistant")
+    st.markdown("""
+    The AI Assistant tab uses Google's Gemini AI to analyze your trade data and answer questions.
+
+    Example questions you can ask:
+    - "What are my largest positions?"
+    - "Explain the difference between FIFO and LIFO"
+    - "How many trades do I have for GOLD?"
+    - "What's my average purchase price for SILVER?"
+    - "Which position has the biggest unrealized P&L?"
+    - "What's the total value of my portfolio?"
+    - "When do my positions expire?"
+
+    For the AI Assistant to work, you need to configure a Google API key.
     """)
 
     st.header("Instructions")
