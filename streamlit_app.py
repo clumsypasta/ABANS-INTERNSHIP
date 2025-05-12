@@ -95,17 +95,53 @@ with tab1:
         # Call Data Agent to parse file
         st.subheader("Parsing trade data...")
 
-        # This would be replaced with actual A2A call to Data Agent
-        # For now, we'll simulate the parsing
+        # Handle Excel files with multiple sheets
         if uploaded_file.type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-            df = pd.read_excel(io.BytesIO(file_bytes))
+            # Get list of sheet names
+            excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
+            sheet_names = excel_file.sheet_names
+
+            # Create a multiselect for sheet selection
+            # By default, select all sheets except those that look like output sheets
+            default_sheets = [sheet for sheet in sheet_names if 'output' not in sheet.lower()]
+            selected_sheets = st.multiselect(
+                "Select sheets to process:",
+                options=sheet_names,
+                default=default_sheets,
+                help="Select one or more sheets to process. Hold Ctrl/Cmd to select multiple sheets."
+            )
+
+            if not selected_sheets:
+                st.warning("Please select at least one sheet to process.")
+                st.session_state.df = None
+                return
+
+            # Read data from selected sheets
+            all_dfs = []
+            for sheet in selected_sheets:
+                sheet_df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet)
+                # Add a column to identify the source sheet
+                sheet_df['Source Sheet'] = sheet
+                all_dfs.append(sheet_df)
+
+            # Combine all dataframes
+            if all_dfs:
+                df = pd.concat(all_dfs, ignore_index=True)
+                st.success(f"Successfully loaded data from {len(selected_sheets)} sheets: {', '.join(selected_sheets)}")
+            else:
+                st.error("No data could be loaded from the selected sheets.")
+                st.session_state.df = None
+                return
         else:
+            # For CSV files, just read normally
             df = pd.read_csv(io.BytesIO(file_bytes))
+            st.success("Successfully loaded data from CSV file.")
 
         # Store the dataframe in session state
         st.session_state.df = df
 
         # Display sample of parsed data
+        st.subheader("Sample of parsed data:")
         st.dataframe(df.head())
 
     # Process trades button
@@ -145,7 +181,8 @@ with tab1:
                     'strategy': row['Strategy'],
                     'code': row['Code'],
                     'remarks': row['Remarks'] if 'Remarks' in row and pd.notna(row['Remarks']) else None,
-                    'tagging': row['Tagging'] if 'Tagging' in row and pd.notna(row['Tagging']) else None
+                    'tagging': row['Tagging'] if 'Tagging' in row and pd.notna(row['Tagging']) else None,
+                    'source_sheet': row['Source Sheet'] if 'Source Sheet' in row and pd.notna(row['Source Sheet']) else None
                 }
 
                 trades.append(trade)
@@ -177,14 +214,15 @@ with tab1:
                         trade['client_code'],
                         trade['strategy'],
                         trade['code'],
-                        trade.get('tagging')
+                        trade.get('tagging'),
+                        trade.get('source_sheet')  # Include source sheet in the grouping key
                     )
                     grouped_trades[key].append(trade)
 
                 # Process each group of trades
                 positions = []
                 for key, contract_trades in grouped_trades.items():
-                    contract, exchange, expiry_str, client_code, strategy, code, tagging = key
+                    contract, exchange, expiry_str, client_code, strategy, code, tagging, source_sheet = key
 
                     # Convert expiry to datetime if it's a string
                     if isinstance(expiry_str, str):
@@ -269,7 +307,8 @@ with tab1:
                         "client_code": client_code,
                         "strategy": strategy,
                         "code": code,
-                        "tagging": tagging
+                        "tagging": tagging,
+                        "source_sheet": source_sheet
                     }
                     positions.append(position)
 
@@ -333,44 +372,109 @@ with tab2:
 
         positions_df = st.session_state.positions_df
 
+        # Add a filter for source sheet
+        if 'source_sheet' in positions_df.columns:
+            all_sheets = positions_df['source_sheet'].unique().tolist()
+            selected_viz_sheets = st.multiselect(
+                "Filter by source sheet:",
+                options=all_sheets,
+                default=all_sheets,
+                key="viz_sheet_filter"
+            )
+
+            if selected_viz_sheets:
+                filtered_positions_df = positions_df[positions_df['source_sheet'].isin(selected_viz_sheets)]
+            else:
+                filtered_positions_df = positions_df
+                st.warning("No sheets selected for visualization. Showing all data.")
+        else:
+            filtered_positions_df = positions_df
+
         # Create two columns for charts
         col1, col2 = st.columns(2)
 
         with col1:
             # Bar chart of open quantities
-            fig_qty = go.Figure(data=[
-                go.Bar(
-                    x=positions_df['contract'],
-                    y=positions_df['open_qty'],
+            fig_qty = go.Figure()
+
+            # If source_sheet is available, use it for color grouping
+            if 'source_sheet' in filtered_positions_df.columns:
+                for sheet in filtered_positions_df['source_sheet'].unique():
+                    sheet_data = filtered_positions_df[filtered_positions_df['source_sheet'] == sheet]
+                    fig_qty.add_trace(go.Bar(
+                        x=sheet_data['contract'],
+                        y=sheet_data['open_qty'],
+                        name=f"Sheet: {sheet}"
+                    ))
+            else:
+                fig_qty.add_trace(go.Bar(
+                    x=filtered_positions_df['contract'],
+                    y=filtered_positions_df['open_qty'],
                     marker_color='blue'
-                )
-            ])
+                ))
+
             fig_qty.update_layout(
                 title="Open Quantities by Contract",
                 xaxis_title="Contract",
                 yaxis_title="Quantity",
-                height=400
+                height=400,
+                barmode='group'
             )
             st.plotly_chart(fig_qty, use_container_width=True)
 
         with col2:
             # Bar chart comparing FIFO and LIFO WAP
-            fig_wap = go.Figure(data=[
-                go.Bar(
-                    name='FIFO WAP',
-                    x=positions_df['contract'],
-                    y=positions_df['fifo_wap'],
-                    marker_color='blue'
-                ),
-                go.Bar(
-                    name='LIFO WAP',
-                    x=positions_df['contract'],
-                    y=positions_df['lifo_wap'],
-                    marker_color='green'
+            fig_wap = go.Figure()
+
+            # If source_sheet is available, create a more detailed visualization
+            if 'source_sheet' in filtered_positions_df.columns:
+                # Create a dropdown menu for selecting visualization type
+                wap_view = st.radio(
+                    "Select WAP visualization:",
+                    ["By Contract", "By Sheet"],
+                    horizontal=True
                 )
-            ])
+
+                if wap_view == "By Contract":
+                    # Show FIFO vs LIFO for each contract
+                    fig_wap.add_trace(go.Bar(
+                        name='FIFO WAP',
+                        x=filtered_positions_df['contract'],
+                        y=filtered_positions_df['fifo_wap'],
+                        marker_color='blue'
+                    ))
+                    fig_wap.add_trace(go.Bar(
+                        name='LIFO WAP',
+                        x=filtered_positions_df['contract'],
+                        y=filtered_positions_df['lifo_wap'],
+                        marker_color='green'
+                    ))
+                else:
+                    # Show WAP by sheet for each contract
+                    for sheet in filtered_positions_df['source_sheet'].unique():
+                        sheet_data = filtered_positions_df[filtered_positions_df['source_sheet'] == sheet]
+                        fig_wap.add_trace(go.Bar(
+                            name=f"{sheet} - FIFO",
+                            x=sheet_data['contract'],
+                            y=sheet_data['fifo_wap']
+                        ))
+            else:
+                # Default visualization without sheet information
+                fig_wap.add_trace(go.Bar(
+                    name='FIFO WAP',
+                    x=filtered_positions_df['contract'],
+                    y=filtered_positions_df['fifo_wap'],
+                    marker_color='blue'
+                ))
+                fig_wap.add_trace(go.Bar(
+                    name='LIFO WAP',
+                    x=filtered_positions_df['contract'],
+                    y=filtered_positions_df['lifo_wap'],
+                    marker_color='green'
+                ))
+
             fig_wap.update_layout(
-                title="FIFO vs LIFO Weighted Average Prices",
+                title="Weighted Average Prices",
                 xaxis_title="Contract",
                 yaxis_title="Price",
                 barmode='group',
@@ -379,17 +483,69 @@ with tab2:
             st.plotly_chart(fig_wap, use_container_width=True)
 
         # Add a pie chart showing position distribution
-        fig_pie = go.Figure(data=[
-            go.Pie(
-                labels=positions_df['contract'],
-                values=positions_df['open_qty'],
-                hole=.3
+        st.subheader("Position Distribution")
+
+        # Create a radio button to select the pie chart view
+        if 'source_sheet' in filtered_positions_df.columns:
+            pie_view = st.radio(
+                "Select pie chart view:",
+                ["By Contract", "By Sheet", "By Contract and Sheet"],
+                horizontal=True
             )
-        ])
-        fig_pie.update_layout(
-            title="Position Distribution by Contract",
-            height=500
-        )
+
+            if pie_view == "By Contract":
+                # Group by contract
+                contract_grouped = filtered_positions_df.groupby('contract')['open_qty'].sum().reset_index()
+                fig_pie = go.Figure(data=[
+                    go.Pie(
+                        labels=contract_grouped['contract'],
+                        values=contract_grouped['open_qty'],
+                        hole=.3
+                    )
+                ])
+                fig_pie.update_layout(
+                    title="Position Distribution by Contract",
+                    height=500
+                )
+            elif pie_view == "By Sheet":
+                # Group by sheet
+                sheet_grouped = filtered_positions_df.groupby('source_sheet')['open_qty'].sum().reset_index()
+                fig_pie = go.Figure(data=[
+                    go.Pie(
+                        labels=sheet_grouped['source_sheet'],
+                        values=sheet_grouped['open_qty'],
+                        hole=.3
+                    )
+                ])
+                fig_pie.update_layout(
+                    title="Position Distribution by Sheet",
+                    height=500
+                )
+            else:
+                # Create a sunburst chart for hierarchical view
+                fig_pie = go.Figure(go.Sunburst(
+                    labels=filtered_positions_df['contract'].astype(str) + " | " + filtered_positions_df['source_sheet'].astype(str),
+                    parents=filtered_positions_df['source_sheet'],
+                    values=filtered_positions_df['open_qty'],
+                ))
+                fig_pie.update_layout(
+                    title="Position Distribution by Contract and Sheet",
+                    height=600
+                )
+        else:
+            # Default pie chart without sheet information
+            fig_pie = go.Figure(data=[
+                go.Pie(
+                    labels=filtered_positions_df['contract'],
+                    values=filtered_positions_df['open_qty'],
+                    hole=.3
+                )
+            ])
+            fig_pie.update_layout(
+                title="Position Distribution by Contract",
+                height=500
+            )
+
         st.plotly_chart(fig_pie, use_container_width=True)
 
     else:
@@ -546,6 +702,14 @@ with tab4:
                     total_contracts = positions_df['contract'].nunique()
                     contracts_list = positions_df['contract'].unique().tolist()
 
+                    # Get sheet information if available
+                    if 'source_sheet' in positions_df.columns:
+                        sheets_list = positions_df['source_sheet'].unique().tolist()
+                        total_sheets = len(sheets_list)
+                    else:
+                        sheets_list = []
+                        total_sheets = 0
+
                     # Find largest position
                     if not positions_df.empty:
                         largest_position = positions_df.loc[positions_df['open_qty'].idxmax()]
@@ -566,50 +730,135 @@ with tab4:
                         # Find which contract they're asking about
                         for contract in contracts_list:
                             if contract.lower() in prompt.lower():
-                                contract_data = positions_df[positions_df['contract'] == contract].iloc[0]
-                                response = f"""
-                                You have a position in **{contract}** with:
-                                - Open quantity: **{contract_data['open_qty']}**
-                                - FIFO weighted average price: **${contract_data['fifo_wap']}**
-                                - LIFO weighted average price: **${contract_data['lifo_wap']}**
-                                - Expiry date: **{contract_data['expiry']}**
-                                """
+                                # Get all positions for this contract
+                                contract_positions = positions_df[positions_df['contract'] == contract]
+
+                                # If there's only one position for this contract
+                                if len(contract_positions) == 1:
+                                    contract_data = contract_positions.iloc[0]
+
+                                    # Include sheet info if available
+                                    sheet_info = ""
+                                    if 'source_sheet' in contract_positions.columns:
+                                        sheet_info = f"- Source sheet: **{contract_data['source_sheet']}**"
+
+                                    response = f"""
+                                    You have a position in **{contract}** with:
+                                    - Open quantity: **{contract_data['open_qty']}**
+                                    - FIFO weighted average price: **${contract_data['fifo_wap']}**
+                                    - LIFO weighted average price: **${contract_data['lifo_wap']}**
+                                    - Expiry date: **{contract_data['expiry']}**
+                                    {sheet_info}
+                                    """
+                                else:
+                                    # Multiple positions for the same contract (from different sheets)
+                                    positions_details = []
+                                    for _, pos in contract_positions.iterrows():
+                                        sheet_name = pos['source_sheet'] if 'source_sheet' in pos and pd.notna(pos['source_sheet']) else "Unknown"
+                                        positions_details.append(f"""
+                                        **Position from sheet {sheet_name}**:
+                                        - Open quantity: **{pos['open_qty']}**
+                                        - FIFO weighted average price: **${pos['fifo_wap']}**
+                                        - LIFO weighted average price: **${pos['lifo_wap']}**
+                                        - Expiry date: **{pos['expiry']}**
+                                        """)
+
+                                    all_positions = "\n".join(positions_details)
+                                    response = f"""
+                                    You have multiple positions in **{contract}** from different sheets:
+
+                                    {all_positions}
+                                    """
                                 break
 
                     elif "fifo" in prompt.lower() or "lifo" in prompt.lower():
                         if num_positions > 0:
-                            # Create a table of FIFO vs LIFO prices
-                            table_rows = []
-                            for _, row in positions_df.iterrows():
-                                table_rows.append(f"| {row['contract']} | ${row['fifo_wap']} | ${row['lifo_wap']} |")
+                            # Check if we have sheet information
+                            if 'source_sheet' in positions_df.columns:
+                                # Create a table of FIFO vs LIFO prices with sheet information
+                                table_rows = []
+                                for _, row in positions_df.iterrows():
+                                    table_rows.append(f"| {row['contract']} | {row['source_sheet']} | ${row['fifo_wap']} | ${row['lifo_wap']} |")
 
-                            table = "\n".join(table_rows)
+                                table = "\n".join(table_rows)
 
-                            response = f"""
-                            **FIFO** (First-In-First-Out) and **LIFO** (Last-In-First-Out) are methods for calculating the weighted average price of your positions:
+                                response = f"""
+                                **FIFO** (First-In-First-Out) and **LIFO** (Last-In-First-Out) are methods for calculating the weighted average price of your positions:
 
-                            - **FIFO**: Assumes that the oldest trades are closed first
-                            - **LIFO**: Assumes that the newest trades are closed first
+                                - **FIFO**: Assumes that the oldest trades are closed first
+                                - **LIFO**: Assumes that the newest trades are closed first
 
-                            Your positions show different weighted average prices using these methods:
+                                Your positions show different weighted average prices using these methods:
 
-                            | Contract | FIFO WAP | LIFO WAP |
-                            |----------|----------|----------|
-                            {table}
-                            """
+                                | Contract | Sheet | FIFO WAP | LIFO WAP |
+                                |----------|-------|----------|----------|
+                                {table}
+                                """
+                            else:
+                                # Create a table of FIFO vs LIFO prices without sheet information
+                                table_rows = []
+                                for _, row in positions_df.iterrows():
+                                    table_rows.append(f"| {row['contract']} | ${row['fifo_wap']} | ${row['lifo_wap']} |")
+
+                                table = "\n".join(table_rows)
+
+                                response = f"""
+                                **FIFO** (First-In-First-Out) and **LIFO** (Last-In-First-Out) are methods for calculating the weighted average price of your positions:
+
+                                - **FIFO**: Assumes that the oldest trades are closed first
+                                - **LIFO**: Assumes that the newest trades are closed first
+
+                                Your positions show different weighted average prices using these methods:
+
+                                | Contract | FIFO WAP | LIFO WAP |
+                                |----------|----------|----------|
+                                {table}
+                                """
                         else:
                             response = "You currently have no open positions to calculate FIFO or LIFO prices."
+
+                    # Handle questions about sheets
+                    elif "sheet" in prompt.lower() or "sheets" in prompt.lower():
+                        if 'source_sheet' in positions_df.columns and total_sheets > 0:
+                            # Create a summary of positions by sheet
+                            sheet_summary = []
+                            for sheet in sheets_list:
+                                sheet_positions = positions_df[positions_df['source_sheet'] == sheet]
+                                sheet_contracts = sheet_positions['contract'].unique().tolist()
+                                sheet_total_qty = sheet_positions['open_qty'].sum()
+                                sheet_summary.append(f"**{sheet}**: {len(sheet_positions)} positions, {len(sheet_contracts)} contracts, total quantity: {sheet_total_qty}")
+
+                            sheets_text = "\n".join(sheet_summary)
+
+                            response = f"""
+                            Your data contains positions from {total_sheets} different sheets:
+
+                            {sheets_text}
+
+                            Each sheet represents a separate set of trade data that has been processed.
+                            """
+                        else:
+                            response = "Your data doesn't contain any sheet information. This could be because you uploaded a CSV file or the Excel file didn't have multiple sheets."
 
                     else:
                         if num_positions > 0:
                             positions_summary = []
                             for _, row in positions_df.iterrows():
-                                positions_summary.append(f"**{row['contract']}** ({row['open_qty']} units)")
+                                # Include sheet info if available
+                                if 'source_sheet' in positions_df.columns:
+                                    positions_summary.append(f"**{row['contract']}** ({row['open_qty']} units, from sheet {row['source_sheet']})")
+                                else:
+                                    positions_summary.append(f"**{row['contract']}** ({row['open_qty']} units)")
 
                             positions_text = ", ".join(positions_summary)
 
+                            # Include sheet information in the response if available
+                            sheet_info = ""
+                            if 'source_sheet' in positions_df.columns and total_sheets > 0:
+                                sheet_info = f"\nYour data comes from {total_sheets} different sheets: {', '.join(sheets_list)}."
+
                             response = f"""
-                            I've analyzed your trade data. You have {num_positions} open positions: {positions_text}.
+                            I've analyzed your trade data. You have {num_positions} open positions: {positions_text}.{sheet_info}
 
                             What specific information would you like to know about your positions?
 
@@ -618,6 +867,7 @@ with tab4:
                             - Your largest position
                             - FIFO vs LIFO pricing
                             - Expiry dates
+                            - Information about specific sheets
                             """
                         else:
                             response = "You currently have no open positions in your data. Please upload trade data and calculate positions first."
