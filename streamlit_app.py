@@ -102,11 +102,27 @@ with tab1:
         else:
             df = pd.read_csv(io.BytesIO(file_bytes))
 
+        # Validate the dataframe has the required columns
+        required_columns = ['Date', 'Commodity', 'Buy', 'Buy Average', 'Sell', 'Sell Average',
+                           'Exchange', 'Expiry', 'Client Code', 'Strategy', 'Code']
+
+        missing_columns = [col for col in required_columns if col not in df.columns]
+
+        if missing_columns:
+            st.error(f"The uploaded file is missing the following required columns: {', '.join(missing_columns)}")
+            st.info("Please ensure your file has all the required columns: " +
+                   ", ".join(required_columns) + " (Remarks and Tagging are optional)")
+            # Don't store the invalid dataframe
+            st.stop()  # Use st.stop() instead of return
+
         # Store the dataframe in session state
         st.session_state.df = df
 
         # Display sample of parsed data
         st.dataframe(df.head())
+
+        # Show data types to help with debugging
+        st.expander("Data Types Information").write(df.dtypes)
 
     # Process trades button
     if st.session_state.df is not None:
@@ -132,21 +148,46 @@ with tab1:
                     quantity = row['Sell']
                     price = row['Sell Average']
 
-                # Create trade dictionary
-                trade = {
-                    'date': row['Date'].isoformat() if isinstance(row['Date'], datetime) else row['Date'],
-                    'contract': row['Commodity'],
-                    'side': side,
-                    'quantity': float(quantity),
-                    'price': float(price),
-                    'expiry': row['Expiry'].isoformat() if isinstance(row['Expiry'], datetime) else row['Expiry'],
-                    'exchange': row['Exchange'],
-                    'client_code': int(row['Client Code']),
-                    'strategy': row['Strategy'],
-                    'code': row['Code'],
-                    'remarks': row['Remarks'] if 'Remarks' in row and pd.notna(row['Remarks']) else None,
-                    'tagging': row['Tagging'] if 'Tagging' in row and pd.notna(row['Tagging']) else None
-                }
+                # Create trade dictionary with safe type conversions
+                try:
+                    # Handle date and expiry
+                    date_val = row['Date'].isoformat() if isinstance(row['Date'], datetime) else row['Date']
+                    expiry_val = row['Expiry'].isoformat() if isinstance(row['Expiry'], datetime) else row['Expiry']
+
+                    # Handle numeric values with safe conversion
+                    try:
+                        quantity_val = float(quantity)
+                    except (ValueError, TypeError):
+                        st.warning(f"Invalid quantity value: {quantity}. Using 0.")
+                        quantity_val = 0.0
+
+                    try:
+                        price_val = float(price)
+                    except (ValueError, TypeError):
+                        st.warning(f"Invalid price value: {price}. Using 0.")
+                        price_val = 0.0
+
+                    # Keep client_code as string to handle alphanumeric values
+                    client_code_val = str(row['Client Code'])
+
+                    trade = {
+                        'date': date_val,
+                        'contract': row['Commodity'],
+                        'side': side,
+                        'quantity': quantity_val,
+                        'price': price_val,
+                        'expiry': expiry_val,
+                        'exchange': row['Exchange'],
+                        'client_code': client_code_val,
+                        'strategy': row['Strategy'],
+                        'code': row['Code'],
+                        'remarks': row['Remarks'] if 'Remarks' in row and pd.notna(row['Remarks']) else None,
+                        'tagging': row['Tagging'] if 'Tagging' in row and pd.notna(row['Tagging']) else None
+                    }
+                except Exception as e:
+                    st.error(f"Error processing row: {e}")
+                    st.write(f"Problematic row: {row}")
+                    continue
 
                 trades.append(trade)
 
@@ -170,14 +211,15 @@ with tab1:
                 grouped_trades = defaultdict(list)
                 for trade in trades_data:
                     # Create a unique key for each contract group
+                    # All values in the key should be treated as strings for consistency
                     key = (
-                        trade['contract'],
-                        trade['exchange'],
-                        trade['expiry'],
-                        trade['client_code'],
-                        trade['strategy'],
-                        trade['code'],
-                        trade.get('tagging')
+                        str(trade['contract']),
+                        str(trade['exchange']),
+                        str(trade['expiry']),
+                        str(trade['client_code']),  # Now client_code is already a string
+                        str(trade['strategy']),
+                        str(trade['code']),
+                        str(trade.get('tagging', ''))  # Handle None values
                     )
                     grouped_trades[key].append(trade)
 
@@ -186,11 +228,31 @@ with tab1:
                 for key, contract_trades in grouped_trades.items():
                     contract, exchange, expiry_str, client_code, strategy, code, tagging = key
 
-                    # Convert expiry to datetime if it's a string
-                    if isinstance(expiry_str, str):
-                        expiry = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
-                    else:
-                        expiry = expiry_str
+                    # Convert expiry to datetime if it's a string with error handling
+                    try:
+                        if isinstance(expiry_str, str):
+                            # Try to parse the expiry date string
+                            try:
+                                # First try ISO format
+                                expiry = datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+                            except ValueError:
+                                # If that fails, try common date formats
+                                for date_format in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%m-%d-%Y']:
+                                    try:
+                                        expiry = datetime.strptime(expiry_str, date_format)
+                                        break
+                                    except ValueError:
+                                        continue
+                                else:
+                                    # If all formats fail, use a far future date and warn the user
+                                    st.warning(f"Could not parse expiry date: {expiry_str}. Using a default future date.")
+                                    expiry = datetime.now().replace(year=datetime.now().year + 10)
+                        else:
+                            expiry = expiry_str
+                    except Exception as e:
+                        st.error(f"Error processing expiry date: {e}")
+                        # Use a far future date as fallback
+                        expiry = datetime.now().replace(year=datetime.now().year + 10)
 
                     # Skip expired contracts - only process active contracts
                     if expiry <= current_date:
@@ -258,20 +320,24 @@ with tab1:
                     fifo_wap = calculate_weighted_average(list(fifo_deque))
                     lifo_wap = calculate_weighted_average(list(lifo_deque))
 
-                    # Create position
-                    position = {
-                        "contract": contract,
-                        "open_qty": fifo_open_qty,
-                        "fifo_wap": fifo_wap,
-                        "lifo_wap": lifo_wap,
-                        "exchange": exchange,
-                        "expiry": expiry.isoformat() if isinstance(expiry, datetime) else expiry,
-                        "client_code": client_code,
-                        "strategy": strategy,
-                        "code": code,
-                        "tagging": tagging
-                    }
-                    positions.append(position)
+                    # Create position with safe type handling
+                    try:
+                        position = {
+                            "contract": str(contract),
+                            "open_qty": float(fifo_open_qty),
+                            "fifo_wap": float(fifo_wap),
+                            "lifo_wap": float(lifo_wap),
+                            "exchange": str(exchange),
+                            "expiry": expiry.isoformat() if isinstance(expiry, datetime) else str(expiry),
+                            "client_code": str(client_code),  # Keep as string to handle alphanumeric values
+                            "strategy": str(strategy),
+                            "code": str(code),
+                            "tagging": str(tagging) if tagging is not None else None
+                        }
+                        positions.append(position)
+                    except Exception as e:
+                        st.error(f"Error creating position: {e}")
+                        st.write(f"Problematic position data: contract={contract}, client_code={client_code}")
 
                 # Success message
                 st.success(f"Successfully calculated {len(positions)} positions.")
@@ -652,16 +718,19 @@ with st.sidebar:
     4. Use the AI Assistant to ask questions about your data
 
     The file should contain columns for:
-    - Date
+    - Date (in any standard date format)
     - Commodity/Contract
-    - Buy/Sell quantities
-    - Buy/Sell prices
+    - Buy/Sell quantities (numeric values)
+    - Buy/Sell prices (numeric values)
     - Exchange
-    - Expiry
-    - Client Code
+    - Expiry (in any standard date format)
+    - Client Code (can be alphanumeric)
     - Strategy
     - Code
+    - Remarks (optional)
     - Tagging (optional)
+
+    Note: The application now supports alphanumeric client codes and provides better error handling for various data formats.
     """)
 
     # Add a link to the example data
