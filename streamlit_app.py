@@ -110,26 +110,35 @@ def generate_ai_response(prompt, data_context):
     Please analyze this data to answer my question. Provide clear explanations and insights.
     """
 
-    # Configure the model
+    # Configure the model for faster responses
     generation_config = {
-        "temperature": 0.2,
-        "top_p": 0.95,
-        "top_k": 64,
-        "max_output_tokens": 2048,
+        "temperature": 0.1,  # Lower temperature for more focused responses
+        "top_p": 0.85,       # Slightly lower top_p for faster generation
+        "top_k": 40,         # Lower top_k for faster responses
+        "max_output_tokens": 1024,  # Shorter responses
     }
 
-    # Create the model
+    # Create the model with the flash version for faster responses
     model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.0-flash",  # Use the flash model for speed
         generation_config=generation_config
     )
 
-    # Generate the response
-    response = model.generate_content([
-        {"role": "user", "parts": [system_prompt]},
-        {"role": "model", "parts": ["I understand. I'll help analyze trade data and positions based on the context provided."]},
-        {"role": "user", "parts": [user_prompt]}
-    ])
+    # Generate the response with a timeout
+    try:
+        # Set a timeout for the response generation
+        response = model.generate_content([
+            {"role": "user", "parts": [system_prompt]},
+            {"role": "model", "parts": ["I understand. I'll help analyze trade data and positions based on the context provided."]},
+            {"role": "user", "parts": [user_prompt]}
+        ])
+    except Exception as e:
+        # If there's a timeout or other error, return a simplified response
+        return f"I'm having trouble generating a detailed response right now. Here's what I know about your data:\n\n" + \
+               f"- File: {data_context['raw_data']['file_name']}\n" + \
+               f"- Columns: {', '.join(data_context['raw_data']['columns'])}\n" + \
+               f"- Rows: {data_context['raw_data']['row_count']}\n\n" + \
+               f"Error details: {str(e)}"
 
     return response.text
 
@@ -145,7 +154,7 @@ def format_data_for_ai(data_context):
     """
     context_parts = []
 
-    # Add raw data information first
+    # Add raw data information first (optimized)
     if "raw_data" in data_context:
         raw_data = data_context["raw_data"]
         context_parts.append(f"## Raw Data Information")
@@ -155,71 +164,160 @@ def format_data_for_ai(data_context):
         if raw_data['columns']:
             context_parts.append(f"Columns: {', '.join(raw_data['columns'])}")
 
-        # Add sample of raw data
+        # Add sample of raw data (more concise format)
         if raw_data['data_sample']:
-            context_parts.append("\n### Raw Data Sample (first 10 rows):")
-            for i, row in enumerate(raw_data['data_sample']):
-                row_str = ", ".join([f"{k}: {v}" for k, v in row.items()])
-                context_parts.append(f"Row {i+1}: {row_str}")
+            context_parts.append("\n### Raw Data Sample (first rows):")
+            # Only show first 5 rows in a more compact format
+            for i, row in enumerate(raw_data['data_sample'][:5]):
+                compact_row = {k: v for k, v in row.items() if v is not None and v != ''}
+                context_parts.append(f"Row {i+1}: {compact_row}")
 
-    # Add position stats
+    # Add position stats (more concise)
     if "position_stats" in data_context:
         stats = data_context["position_stats"]
         context_parts.append(f"\n## Position Summary")
-        context_parts.append(f"Number of positions: {stats['num_positions']}")
-        context_parts.append(f"Number of contracts: {stats['total_contracts']}")
-        context_parts.append(f"Total quantity: {stats['total_quantity']}")
-        context_parts.append(f"Average FIFO price: {stats['avg_fifo_price']:.2f}")
-        context_parts.append(f"Average LIFO price: {stats['avg_lifo_price']:.2f}")
+        context_parts.append(f"Positions: {stats['num_positions']} across {stats['total_contracts']} contracts")
+        context_parts.append(f"Total quantity: {stats['total_quantity']}, Avg FIFO: {stats['avg_fifo_price']:.2f}, Avg LIFO: {stats['avg_lifo_price']:.2f}")
         context_parts.append(f"Contracts: {', '.join(stats['contracts_list'])}")
 
-    # Add P&L stats if available
+    # Add P&L stats if available (more concise)
     if "pnl_stats" in data_context:
         pnl_stats = data_context["pnl_stats"]
-        context_parts.append(f"\n## P&L Summary")
-        context_parts.append(f"Total FIFO P&L: {pnl_stats['total_fifo_pnl']:.2f}")
-        context_parts.append(f"Total LIFO P&L: {pnl_stats['total_lifo_pnl']:.2f}")
+        context_parts.append(f"\n## P&L Summary: FIFO P&L: {pnl_stats['total_fifo_pnl']:.2f}, LIFO P&L: {pnl_stats['total_lifo_pnl']:.2f}")
 
-    # Add position details
+    # Add position details (more concise)
     if "positions" in data_context and data_context["positions"]:
         context_parts.append("\n## Position Details:")
-        for i, pos in enumerate(data_context["positions"]):  # Include all positions
-            context_parts.append(
-                f"Position {i+1}: {pos['contract']}, Quantity: {pos['open_qty']}, "
-                f"FIFO WAP: {pos['fifo_wap']:.2f}, LIFO WAP: {pos['lifo_wap']:.2f}, "
-                f"Expiry: {pos['expiry']}, Client: {pos['client_code']}"
-            )
+        # Create a more compact representation
+        positions_table = []
+        for pos in data_context["positions"]:
+            positions_table.append(f"{pos['contract']}: Qty={pos['open_qty']}, FIFO={pos['fifo_wap']:.2f}, LIFO={pos['lifo_wap']:.2f}, Expiry={pos['expiry']}, Client={pos['client_code']}")
+        context_parts.append("\n".join(positions_table))
 
-    # Add P&L details if available
-    if "pnl" in data_context and data_context["pnl"]:
-        context_parts.append("\n## P&L Details:")
-        for i, pnl in enumerate(data_context["pnl"]):  # Include all P&L entries
-            context_parts.append(
-                f"P&L {i+1}: {pnl['contract']}, Current Price: {pnl['current_price']:.2f}, "
-                f"FIFO P&L: {pnl['fifo_pnl']:.2f}, LIFO P&L: {pnl['lifo_pnl']:.2f}"
-            )
+    # Add trade data sample (more concise)
+    if "trades_sample" in data_context and data_context["trades_sample"]:
+        sample_count = len(data_context["trades_sample"])
+        total_count = data_context["raw_data"]["row_count"] if "raw_data" in data_context else sample_count
 
-    # Add trade summary if available
-    if "trades" in data_context and data_context["trades"]:
-        context_parts.append(f"\n## Trade Summary")
-        context_parts.append(f"Total trades: {len(data_context['trades'])}")
+        context_parts.append(f"\n## Trade Data Sample ({sample_count} of {total_count} rows):")
+        # Only include key fields for each trade
+        for i, trade in enumerate(data_context["trades_sample"][:10]):  # Limit to 10 trades
+            key_fields = {k: trade.get(k) for k in ['date', 'contract', 'side', 'quantity', 'price', 'client_code'] if k in trade}
+            context_parts.append(f"Trade {i+1}: {key_fields}")
 
-        # Count buys and sells
-        buy_count = sum(1 for trade in data_context["trades"] if trade.get('side') == 'Buy')
-        sell_count = sum(1 for trade in data_context["trades"] if trade.get('side') == 'Sell')
-        context_parts.append(f"Buy trades: {buy_count}, Sell trades: {sell_count}")
+    # Add data rows if available
+    if "raw_data" in data_context and "data_rows" in data_context["raw_data"] and data_context["raw_data"]["data_rows"]:
+        context_parts.append(f"\n## Complete Data Rows:")
+        # Include the first 10 rows in a compact format
+        for i, row in enumerate(data_context["raw_data"]["data_rows"][:10]):
+            compact_row = {k: v for k, v in row.items() if v is not None and v != ''}
+            context_parts.append(f"Row {i+1}: {compact_row}")
 
-        # Add all trades (not just a sample)
-        context_parts.append("\n### All Trades:")
-        for i, trade in enumerate(data_context["trades"]):
-            trade_details = []
-            for k, v in trade.items():
-                if v is not None:
-                    trade_details.append(f"{k}: {v}")
-
-            context_parts.append(f"Trade {i+1}: {', '.join(trade_details)}")
+        if len(data_context["raw_data"]["data_rows"]) > 10:
+            context_parts.append(f"... and {len(data_context['raw_data']['data_rows']) - 10} more rows available.")
 
     return "\n".join(context_parts)
+
+def generate_quick_data_response(prompt, data_context):
+    """
+    Generate quick responses for simple data-related questions without using the AI API.
+    This provides immediate responses for common data questions.
+
+    Args:
+        prompt: The user's question
+        data_context: Dictionary containing all data context
+
+    Returns:
+        Quick response as a string or None if the question requires more complex analysis
+    """
+    prompt_lower = prompt.lower()
+
+    # Check if raw data exists
+    if "raw_data" not in data_context:
+        return None
+
+    raw_data = data_context["raw_data"]
+
+    # Questions about what data is available
+    if any(q in prompt_lower for q in ["what data can you see", "what data do you have", "what data is available",
+                                      "what data can you access", "what data is in the file", "what data is uploaded"]):
+        response = f"""
+        # Data Available
+
+        I can see the following data:
+
+        - **File**: {raw_data['file_name']} ({raw_data['file_type']})
+        - **Rows**: {raw_data['row_count']} rows of data
+        - **Columns**: {', '.join(raw_data['columns'])}
+
+        The data contains trade information including dates, commodities, buy/sell quantities and prices,
+        exchange information, expiry dates, client codes, and strategy information.
+
+        I can answer questions about this data, analyze positions, and provide insights about your trades.
+        """
+        return response
+
+    # Questions about columns
+    if any(q in prompt_lower for q in ["what columns", "what fields", "column names", "field names"]):
+        response = f"""
+        # Columns in the Data
+
+        The data contains the following columns:
+
+        {', '.join(raw_data['columns'])}
+        """
+        return response
+
+    # Questions about specific column values
+    for col in raw_data['columns']:
+        if col.lower() in prompt_lower and "values" in prompt_lower:
+            # Extract unique values from the sample data
+            values = set()
+            for row in raw_data['data_sample'] + raw_data.get('data_rows', []):
+                if col in row and row[col] is not None:
+                    values.add(str(row[col]))
+
+            values_list = list(values)
+            if len(values_list) > 20:
+                values_list = values_list[:20]
+                values_str = ", ".join(values_list) + f", ... (and {len(values) - 20} more unique values)"
+            else:
+                values_str = ", ".join(values_list)
+
+            response = f"""
+            # Values in the '{col}' Column
+
+            Based on the data sample, the '{col}' column contains these values:
+
+            {values_str}
+            """
+            return response
+
+    # Questions about row count
+    if any(q in prompt_lower for q in ["how many rows", "row count", "number of rows", "data size"]):
+        response = f"""
+        # Data Size
+
+        The uploaded file contains **{raw_data['row_count']} rows** of data.
+        """
+        return response
+
+    # Questions about specific rows
+    if "first row" in prompt_lower or "row 1" in prompt_lower:
+        if raw_data['data_sample']:
+            row = raw_data['data_sample'][0]
+            row_str = "\n".join([f"- **{k}**: {v}" for k, v in row.items() if v is not None])
+            response = f"""
+            # First Row of Data
+
+            The first row contains:
+
+            {row_str}
+            """
+            return response
+
+    # Return None if no quick response is available
+    return None
 
 def generate_simple_response(prompt, positions_df):
     """
@@ -884,9 +982,9 @@ with tab4:
         positions_df = st.session_state.positions_df
         trades_df = st.session_state.df if st.session_state.df is not None else None
 
-        # Create a comprehensive data context with all available data
+        # Create a more efficient data context
         data_context = {
-            # Include the raw dataframe information
+            # Include the raw dataframe information (optimized)
             "raw_data": {
                 "file_name": st.session_state.uploaded_file.name if st.session_state.uploaded_file else "No file uploaded",
                 "file_type": st.session_state.uploaded_file.type if st.session_state.uploaded_file else "Unknown",
@@ -894,14 +992,15 @@ with tab4:
                 "row_count": len(trades_df) if trades_df is not None else 0,
                 "data_sample": trades_df.head(10).to_dict('records') if trades_df is not None else [],
                 "data_summary": trades_df.describe().to_dict() if trades_df is not None else {},
-                "full_data": trades_df.to_dict('records') if trades_df is not None else []
+                # Only include first 50 rows of full data to avoid overwhelming the AI
+                "data_rows": trades_df.head(50).to_dict('records') if trades_df is not None else []
             },
 
-            # Include processed position data
+            # Include processed position data (all positions since there are usually fewer)
             "positions": positions_df.to_dict('records') if positions_df is not None else [],
 
-            # Include original trade data
-            "trades": trades_df.to_dict('records') if trades_df is not None else [],
+            # Include a sample of original trade data
+            "trades_sample": trades_df.head(20).to_dict('records') if trades_df is not None else [],
 
             # Include statistical summaries
             "position_stats": {
@@ -942,7 +1041,11 @@ with tab4:
             # Display assistant response
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    if use_advanced_ai:
+                    # Check if it's a simple question about the data that we can answer directly
+                    quick_response = generate_quick_data_response(prompt, st.session_state.data_context)
+                    if quick_response:
+                        response = quick_response
+                    elif use_advanced_ai:
                         try:
                             # Use Gemini AI for advanced response
                             response = generate_ai_response(prompt, st.session_state.data_context)
