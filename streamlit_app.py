@@ -78,6 +78,14 @@ def generate_ai_response(prompt, data_context):
     - Explain financial concepts like FIFO and LIFO
     - Provide insights about trading patterns and positions
     - Calculate statistics and metrics from the data
+    - Access and analyze the raw data from uploaded files
+
+    The data context provided to you includes:
+    1. Raw Data Information - The original data from the uploaded file
+    2. Position Summary - Statistics about calculated positions
+    3. Position Details - Information about each position
+    4. P&L Details - Profit and loss calculations
+    5. Trade Summary - Information about all trades
 
     When responding:
     - Be concise but thorough
@@ -85,7 +93,11 @@ def generate_ai_response(prompt, data_context):
     - Include relevant numbers and calculations
     - Explain your reasoning
     - If asked about specific contracts, focus on those
+    - If asked about the raw data, refer to the Raw Data Information section
+    - If asked about specific sheets or data elements, look for them in the raw data
     - If the data doesn't contain information to answer the question, explain what's missing
+
+    IMPORTANT: When asked about specific data in the uploaded file, always check the Raw Data Information section first. This contains the complete data from the file, including all rows and columns.
     """
 
     # Create the user prompt with the question and data context
@@ -133,10 +145,29 @@ def format_data_for_ai(data_context):
     """
     context_parts = []
 
+    # Add raw data information first
+    if "raw_data" in data_context:
+        raw_data = data_context["raw_data"]
+        context_parts.append(f"## Raw Data Information")
+        context_parts.append(f"File: {raw_data['file_name']} ({raw_data['file_type']})")
+        context_parts.append(f"Total rows: {raw_data['row_count']}")
+
+        if raw_data['columns']:
+            context_parts.append(f"Columns: {', '.join(raw_data['columns'])}")
+
+        # Add sample of raw data
+        if raw_data['data_sample']:
+            context_parts.append("\n### Raw Data Sample (first 10 rows):")
+            for i, row in enumerate(raw_data['data_sample']):
+                row_str = ", ".join([f"{k}: {v}" for k, v in row.items()])
+                context_parts.append(f"Row {i+1}: {row_str}")
+
     # Add position stats
     if "position_stats" in data_context:
         stats = data_context["position_stats"]
-        context_parts.append(f"Position Summary: {stats['num_positions']} positions across {stats['total_contracts']} contracts")
+        context_parts.append(f"\n## Position Summary")
+        context_parts.append(f"Number of positions: {stats['num_positions']}")
+        context_parts.append(f"Number of contracts: {stats['total_contracts']}")
         context_parts.append(f"Total quantity: {stats['total_quantity']}")
         context_parts.append(f"Average FIFO price: {stats['avg_fifo_price']:.2f}")
         context_parts.append(f"Average LIFO price: {stats['avg_lifo_price']:.2f}")
@@ -145,54 +176,48 @@ def format_data_for_ai(data_context):
     # Add P&L stats if available
     if "pnl_stats" in data_context:
         pnl_stats = data_context["pnl_stats"]
+        context_parts.append(f"\n## P&L Summary")
         context_parts.append(f"Total FIFO P&L: {pnl_stats['total_fifo_pnl']:.2f}")
         context_parts.append(f"Total LIFO P&L: {pnl_stats['total_lifo_pnl']:.2f}")
 
     # Add position details
     if "positions" in data_context and data_context["positions"]:
-        context_parts.append("\nPosition Details:")
-        for i, pos in enumerate(data_context["positions"][:10]):  # Limit to first 10 positions
+        context_parts.append("\n## Position Details:")
+        for i, pos in enumerate(data_context["positions"]):  # Include all positions
             context_parts.append(
                 f"Position {i+1}: {pos['contract']}, Quantity: {pos['open_qty']}, "
                 f"FIFO WAP: {pos['fifo_wap']:.2f}, LIFO WAP: {pos['lifo_wap']:.2f}, "
                 f"Expiry: {pos['expiry']}, Client: {pos['client_code']}"
             )
 
-        if len(data_context["positions"]) > 10:
-            context_parts.append(f"... and {len(data_context['positions']) - 10} more positions")
-
     # Add P&L details if available
     if "pnl" in data_context and data_context["pnl"]:
-        context_parts.append("\nP&L Details:")
-        for i, pnl in enumerate(data_context["pnl"][:10]):  # Limit to first 10 P&L entries
+        context_parts.append("\n## P&L Details:")
+        for i, pnl in enumerate(data_context["pnl"]):  # Include all P&L entries
             context_parts.append(
                 f"P&L {i+1}: {pnl['contract']}, Current Price: {pnl['current_price']:.2f}, "
                 f"FIFO P&L: {pnl['fifo_pnl']:.2f}, LIFO P&L: {pnl['lifo_pnl']:.2f}"
             )
 
-        if len(data_context["pnl"]) > 10:
-            context_parts.append(f"... and {len(data_context['pnl']) - 10} more P&L entries")
-
     # Add trade summary if available
     if "trades" in data_context and data_context["trades"]:
-        context_parts.append(f"\nTrade Summary: {len(data_context['trades'])} trades")
+        context_parts.append(f"\n## Trade Summary")
+        context_parts.append(f"Total trades: {len(data_context['trades'])}")
 
         # Count buys and sells
         buy_count = sum(1 for trade in data_context["trades"] if trade.get('side') == 'Buy')
         sell_count = sum(1 for trade in data_context["trades"] if trade.get('side') == 'Sell')
         context_parts.append(f"Buy trades: {buy_count}, Sell trades: {sell_count}")
 
-        # Add sample trades
-        context_parts.append("\nSample Trades:")
-        for i, trade in enumerate(data_context["trades"][:5]):  # Limit to first 5 trades
-            context_parts.append(
-                f"Trade {i+1}: {trade.get('date', 'N/A')}, {trade.get('contract', 'N/A')}, "
-                f"{trade.get('side', 'N/A')}, Quantity: {trade.get('quantity', 'N/A')}, "
-                f"Price: {trade.get('price', 'N/A')}, Client: {trade.get('client_code', 'N/A')}"
-            )
+        # Add all trades (not just a sample)
+        context_parts.append("\n### All Trades:")
+        for i, trade in enumerate(data_context["trades"]):
+            trade_details = []
+            for k, v in trade.items():
+                if v is not None:
+                    trade_details.append(f"{k}: {v}")
 
-        if len(data_context["trades"]) > 5:
-            context_parts.append(f"... and {len(data_context['trades']) - 5} more trades")
+            context_parts.append(f"Trade {i+1}: {', '.join(trade_details)}")
 
     return "\n".join(context_parts)
 
@@ -859,10 +884,26 @@ with tab4:
         positions_df = st.session_state.positions_df
         trades_df = st.session_state.df if st.session_state.df is not None else None
 
-        # Update data context in session state
-        st.session_state.data_context = {
+        # Create a comprehensive data context with all available data
+        data_context = {
+            # Include the raw dataframe information
+            "raw_data": {
+                "file_name": st.session_state.uploaded_file.name if st.session_state.uploaded_file else "No file uploaded",
+                "file_type": st.session_state.uploaded_file.type if st.session_state.uploaded_file else "Unknown",
+                "columns": trades_df.columns.tolist() if trades_df is not None else [],
+                "row_count": len(trades_df) if trades_df is not None else 0,
+                "data_sample": trades_df.head(10).to_dict('records') if trades_df is not None else [],
+                "data_summary": trades_df.describe().to_dict() if trades_df is not None else {},
+                "full_data": trades_df.to_dict('records') if trades_df is not None else []
+            },
+
+            # Include processed position data
             "positions": positions_df.to_dict('records') if positions_df is not None else [],
+
+            # Include original trade data
             "trades": trades_df.to_dict('records') if trades_df is not None else [],
+
+            # Include statistical summaries
             "position_stats": {
                 "num_positions": len(positions_df) if positions_df is not None else 0,
                 "total_contracts": positions_df['contract'].nunique() if positions_df is not None else 0,
@@ -875,11 +916,14 @@ with tab4:
 
         # If we have P&L data, add it to the context
         if st.session_state.pnl_df is not None:
-            st.session_state.data_context["pnl"] = st.session_state.pnl_df.to_dict('records')
-            st.session_state.data_context["pnl_stats"] = {
+            data_context["pnl"] = st.session_state.pnl_df.to_dict('records')
+            data_context["pnl_stats"] = {
                 "total_fifo_pnl": st.session_state.pnl_df['fifo_pnl'].sum(),
                 "total_lifo_pnl": st.session_state.pnl_df['lifo_pnl'].sum()
             }
+
+        # Update session state with the comprehensive data context
+        st.session_state.data_context = data_context
 
         # Display chat messages
         for message in st.session_state.messages:
