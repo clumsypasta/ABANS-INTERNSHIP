@@ -1,0 +1,10 @@
+google-adk
+pandas
+numpy
+openpyxl
+streamlit
+plotly
+yfinance
+fastapi
+uvicorn
+python-dotenv

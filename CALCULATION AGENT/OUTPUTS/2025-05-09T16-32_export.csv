@@ -1,0 +1,2 @@
+,contract,open_qty,fifo_wap,lifo_wap,exchange,expiry,client_code,strategy,code,tagging
+0,GOLD,100.0,1850.25,1855.75,MCX,2025-06-30,1,RATIO,RATIO,GC/SI
