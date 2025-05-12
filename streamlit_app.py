@@ -47,6 +47,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# Version number for tracking deployments
+VERSION = "1.2.0"  # Updated with enhanced AI capabilities
+
 # Title and description
 st.title("Trade Position Calculator")
 st.markdown("""
@@ -1118,6 +1121,9 @@ with st.sidebar:
 
     Note: The application now supports alphanumeric client codes and provides better error handling for various data formats.
     """)
+
+    # Display version number
+    st.caption(f"Version: {VERSION} - Last updated: {datetime.now().strftime('%Y-%m-%d')}")
 
     # Add a link to the example data
     st.download_button(
